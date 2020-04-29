@@ -1,0 +1,324 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(caret)
+library(rpart)
+```
+
+```{r}
+aisles = read.csv("aisles.csv")
+departments = read.csv("departments.csv")
+order_products_prior = read.csv("order_products__prior.csv")
+orders = read.csv("orders.csv")
+products= read.csv("products.csv")
+```
+
+```{r}
+# Use only the prior set so that we have no one's last order
+orders <- orders %>% filter(eval_set == 'prior') 
+
+#Add aisle and department data and drop non-relevant products 
+all_product_data <- left_join(order_products_prior, products, by="product_id")
+```
+
+
+```{r}
+# Summarize each order
+by_order <- all_product_data %>% group_by(order_id)
+
+order_data <- by_order %>% summarize(num_products=n(),reordered_products=sum(reordered),num_aisles=n_distinct(aisle_id),num_departments=n_distinct(department_id))
+```
+
+```{r}
+#Department Distros Per Order
+
+department_distro<- by_order %>% group_by(order_id, department_id) %>% summarize(count=n()) %>% group_by(order_id) %>% mutate(perc=count/sum(count))
+#find % of each department for each order
+
+department_distro <- department_distro %>% select(-count) %>% pivot_wider(names_from=department_id, names_prefix="perc_from_dep_", values_from = perc) #Make each department its own column
+
+department_distro[is.na(department_distro)]<-0 #Replace N/As with 0s
+
+order_data <- left_join(order_data, department_distro, by="order_id") #Join to Order_Data 
+```
+
+```{r}
+#Specialty Flags Per Order
+
+flag_data <- by_order %>% mutate(kitchen_flag = ifelse((aisle_id == 10)|(aisle_id == 54)|(aisle_id==60)|(aisle_id==85)|(aisle_id==111),1,0)) # 10 - kitchen supplies,  54 - paper goods, 60 - trash bags liners, 85 - food storage, 111 - plates bowls cups 
+rm(by_order,order_products_prior) #memory purge
+
+flag_data <- flag_data %>% mutate(beauty_flag = ifelse((aisle_id == 22)|(aisle_id == 55)|(aisle_id==73)|(aisle_id==80)|(aisle_id==109)|(aisle_id==127)|(aisle_id==132),1,0)) # 22 - hair care, 55 - shave needs, 73 - facial care, 80 - deodorants, 109 - skin care, 127 - body lotions soap, 132 - beauty
+
+flag_data <- flag_data %>% mutate(health_flag = ifelse((aisle_id == 11)|(aisle_id == 20)|(aisle_id==44)|(aisle_id==47)|(aisle_id==70)|(aisle_id==118)|(aisle_id==133),1,0)) # 11 - cold flu allergy, 20 - oral hygiene, 44 - eye ear care, 47 - vitamins supplements, 70 - digestion , 118 - first aid, 133 - muscles joints pain relief 
+
+flag_data <- flag_data %>% mutate(cleaning_flag = ifelse((aisle_id == 25)|(aisle_id == 74)|(aisle_id==75)|(aisle_id==101)|(aisle_id==114),1,0)) # 25 - soap , 74 - dish detergents, 75 - laundry , 101 - air fresheners candles, 114 - cleaning products
+
+flag_data <- flag_data %>% mutate(junk_food_flag = ifelse((aisle_id == 4)|(aisle_id == 8)|(aisle_id == 37)|(aisle_id == 45)|(aisle_id == 61)|(aisle_id == 71)|(aisle_id == 103)|(aisle_id == 119),1,0)) # 4 - instant foods, 8 - bakery desserts, 37 - ice cream ice , 45 - candy chocolate, 61 - cookies cakes, 71 - refrigerated pudding desserts , 103 - ice cream toppings, 119 - frozen desserts
+
+## Regex flags taking too long to run
+# flag_data <- flag_data %>% mutate(natural_flag = ifelse(str_detect(product_name, "Organic|Gluten Free|Gluten-Free|100%|Natural|Kombucha|Probiotic|Vegan",),1,0))
+                                 
+# flag_data <- flag_data %>% mutate( diet_flag = ifelse(str_detect(product_name, coll("zero calorie|low fat|lo-fat|lowfat|lite|unsweetened|diet|no sugar added|sugar-free|sugar free|reduced sugar|fat free", ignore_case=TRUE)),1,0))
+
+flag_data_orders <- flag_data %>% group_by(order_id) %>% summarise(num_kitchen=sum(kitchen_flag), num_beauty=sum(beauty_flag), num_health=sum(health_flag), num_cleaning=sum(cleaning_flag), num_junkfood=sum(junk_food_flag))
+
+rm(flag_data)
+order_data <- left_join(order_data, flag_data_orders, by="order_id")
+
+```
+
+
+```{r}
+users_orders<- left_join(orders, order_data, by="order_id") #Join basic order data to summary measures
+```
+
+```{r}
+#Pull info on past order, connect to relevant info on current order 
+previous_order_data <- users_orders %>% mutate(lagged.order = order_number+1) %>% group_by(lagged.order, user_id)
+#Create a lagged order number to match previous order to current order 
+
+previous_order_data <- previous_order_data %>% select(-order_id, - eval_set, -order_number)
+#Remove irrelevant columns
+
+names(previous_order_data) <- paste0("prev_order.", names(previous_order_data) )
+#Rename for clarity
+
+current_order_data <- users_orders %>% select(order_id, user_id, order_number, days_since_prior_order)
+#Keep relevant current info 
+
+order_data_reg <- left_join(current_order_data, previous_order_data, by=c("order_number" = "prev_order.lagged.order", "user_id" = "prev_order.user_id")) #Join two tables
+
+order_data_reg$prev_order.order_dow <- as.factor(order_data_reg$prev_order.order_dow)
+#Update Week Day to Factor
+
+#Create group of hours - morning, afternoon, evening, night. Drop hour. 
+order_data_reg <-order_data_reg %>% mutate(prev_order.time_of_day=case_when(
+  ((prev_order.order_hour_of_day <13) & (prev_order.order_hour_of_day>4)) ~ "Morning",
+  ((prev_order.order_hour_of_day <18) & (prev_order.order_hour_of_day>12)) ~ "Afternoon",
+  ((prev_order.order_hour_of_day < 22) & (prev_order.order_hour_of_day >17)) ~ "Evening",
+  ((prev_order.order_hour_of_day <5) | (prev_order.order_hour_of_day>21)) ~"Night"
+))
+
+order_data_reg <- order_data_reg %>% select(-prev_order.order_hour_of_day)
+
+#Filter
+order_data_reg <- order_data_reg %>% filter(order_number > 1, days_since_prior_order <30)
+#first order has no previous order
+#days capped at 30, so the data is too messy.
+```
+
+```{r}
+order_data_reg$prev_order.days_since_prior_order <- as.integer(order_data_reg$prev_order.days_since_prior_order)
+
+order_data_reg$prev_order.days_since_prior_order <- order_data_reg$prev_order.days_since_prior_order %>% replace_na(mean(order_data_reg$days_since_prior_order, na.rm=TRUE))
+#replace N/A values (because only second order) with the average time between orders overall
+
+order_data_reg <- order_data_reg %>% group_by(user_id) %>% mutate("csum" = cumsum(prev_order.days_since_prior_order)) %>% mutate(avg_time_btwn_orders = csum/(order_number-1)) %>% select(-csum)
+#By user, find the average time between orders for all orders so far. (Cummulative sum of time between orders / # of orders so far)
+
+order_data_reg <- order_data_reg %>% group_by(user_id) %>% mutate("total_prev_products" = cumsum(prev_order.num_products)) #Cummulative number of products ordered
+
+order_data_reg <- order_data_reg %>% group_by(user_id) %>% mutate("perc_kitchen_prev_products" = cumsum(prev_order.num_kitchen)/total_prev_products, "perc_beauty_prev_products" = cumsum(prev_order.num_beauty)/total_prev_products, "perc_health_prev_products" = cumsum(prev_order.num_health)/total_prev_products, "perc_cleaning_prev_products" = cumsum(prev_order.num_cleaning)/total_prev_products, "perc_junkfood_prev_products" = cumsum(prev_order.num_junkfood)/total_prev_products) #Cumulative percentage of all products bought with special flags 
+
+order_data_reg <- order_data_reg %>% mutate("previous_orders"=order_number-1) #How many previous orders have you made?
+```
+
+```{r}
+data_for_reg<- order_data_reg %>% ungroup() %>% select(-order_id, -user_id, -order_number)
+data_for_reg # Get Data Ready for Reg 
+```
+
+
+```{r}
+
+#Set up Data Sets
+set.seed(1)
+train = sample(1:nrow(data_for_reg), floor(0.75*nrow(data_for_reg)))
+validation = sample( train, floor(0.3*length(train)) )
+train_no_validation = train[ (train %in% validation) == FALSE ]
+train_data = data_for_reg[train_no_validation, ]
+valid_data = data_for_reg[validation, ]
+valid_actuals = data_for_reg[validation,]$days_since_prior_order
+test_data =  model.matrix(days_since_prior_order ~ ., data = data_for_reg[-train, ])
+test_data = as.data.frame(test_data)
+
+```
+```{r}
+write_csv(data_for_reg,'data_for_reg.csv')
+```
+
+#```{r}
+##Regression with all Vars
+#timing_lm = train(days_since_prior_order ~ ., 
+#                  data=data_for_reg,
+#                  subset=train_no_validation,
+#                  method="lm")
+#timing_model_1 <- timing_lm$finalModel
+#```
+#```{r}
+#valid_data_matrix=model.matrix(days_since_prior_order ~ ., data = data_for_reg[validation, ])
+#coefs= coef(timing_model_1) 
+#preds = valid_data_matrix[ , names(coefs)] %*% coefs
+#RMSE_1 = mean( (preds - valid_actuals)**2 )**0.5
+#RMSE_1
+#
+##summary(timing_lm)
+#```
+#
+#
+#```{r}
+##Best Subset
+#timing_best.subset = train(form = days_since_prior_order ~ ., 
+#                          data = data_for_reg, 
+#                          subset = train_no_validation,
+#                          method = 'leapSeq',
+#                          tuneGrid = data.frame(nvmax = 31))
+#best.subset = timing_best.subset$finalModel
+#
+#best.subset.summary = summary(best.subset)
+#best_subset = which(best.subset.summary$adjr2 == max(best.subset.summary$adjr2))
+#best_subset
+#best_coefs <- coef(best.subset, best_subset)
+#
+#best_vars<- names(best_coefs)[2:27]
+#```
+#
+#```{r}
+##Regression with best subset
+#valid_data_step = model.matrix(days_since_prior_order ~ ., data = data_for_reg[validation, ])
+#timing_lm = train(days_since_prior_order ~ prev_order.order_dow +    prev_order.order_hour_of_day + prev_order.days_since_prior_order + prev_order.num_products + prev_order.reordered_products + prev_order.num_aisles + prev_order.major_department17 + prev_order.major_department1 + prev_order.major_department7 + prev_order.major_department4  + prev_order.major_department19 + prev_order.major_department16 + prev_order.major_department8 + prev_order.major_department15 +  prev_order.major_department21 + prev_order.major_department5 + prev_order.major_department14 + prev_order.major_department6 + prev_order.major_department12 + prev_order.major_department9 +  prev_order.major_department11 + prev_order.time_of_dayEvening + prev_order.time_of_dayMorning + prev_order.time_of_dayNight + avg_time_btwn_orders + previous_orders, 
+#                  data=data_for_reg,
+#                  subset=train_no_validation,
+#                  method="lm")
+#timing_model_2 <- timing_lm$finalModel
+#
+#pred = predict(timing_model_2, valid_data_step)
+#RMSE_2 = mean( (pred - valid_actuals)**2 )**0.5
+#RMSE_2
+#
+#summary(timing_lm)
+#```
+#
+#
+#```{r -- do not run for}
+##Forward Stepwise Variable Selection (In Case Features Grow Too Big)
+#
+#timing_forward.stepwise = train(form = days_since_prior_order ~ .-, 
+#                               data = data_for_reg, 
+#                               subset = train_no_validation,
+#                               method = 'leapForward',
+#                               tuneGrid = data.frame(nvmax = 31))
+#forward.stepwise = timing_forward.stepwise$finalModel
+#summary(timing_forward.stepwise)
+#
+#model_matrix = as.matrix(valid_data_step)
+#
+#mse_validation = rep(0, 31)
+#for (t in 1:31)
+#{
+#    coefs = coef(forward.stepwise, t)
+#    preds = model_matrix[ , names(coefs)] %*% coefs
+#    mse_validation[t] = mean( (valid_actuals - preds)^2 )
+#}
+#
+#
+#best_size = which(mse_validation == min(mse_validation))
+#best_size
+#
+#coefs = coef(forward.stepwise, best_size)
+#coefs
+#
+#
+#```
+#```{r forward.stepwise test}
+#predict()
+#```
+
+
+```{r --lasso}
+lambdas = c(0, 0.001, 0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1, 10, 100, 1000)
+```
+```{r --lasso pt 2}
+
+
+
+mse_validation = rep(0, len = length(lambdas))
+
+  for(j in 1:length(lambdas))
+  {
+    # Fit the lasso model
+    caret_model_lasso = train(days_since_prior_order ~ ., 
+                               data = data_for_reg,
+                              method = "glmnet",
+                              lambda = lambdas[j],
+                              subset = train_no_validation,
+                              tuneGrid = data.frame(alpha = 1, lambda = lambdas[j]))
+    model_lasso = caret_model_lasso$finalModel
+    
+    # Find the prediction on the test set
+    preds = predict(caret_model_lasso, valid_data)
+     mse_validation[j] = mean( (valid_actuals - preds)^2 )
+  }
+
+
+
+print(mse_validation)
+best_lambda = lambdas[which(mse_validation == min(mse_validation))]
+print(best_lambda)
+
+# Re-train the result on the full training set.
+caret_model_lasso = train(form = days_since_prior_order ~ ., 
+                               data = data_for_reg,
+                          method = "glmnet",
+                         
+                          lambda = best_lambda,
+                          tuneGrid = data.frame(alpha = 1, lambda = best_lambda))
+model_lasso = caret_model_lasso$finalModel
+summary(model_lasso)
+```
+
+
+```{r --test_data}
+coefs = predict( model_lasso, type = "coefficients" )
+test_data =  model.matrix(days_since_prior_order ~ ., data = data_for_reg[-train, ])
+preds = test_data[ , rownames(coefs)] %*% coefs
+pred_actuals= data_for_reg[-train, ]$days_since_prior_order
+mse_test = mean( (pred_actuals - as.vector(preds))^2 )
+mse_test**0.5
+mean_error=mean( abs(pred_actuals - as.vector(preds)) )
+```
+
+```{r --decision tree}
+tree_sample = sample( train, floor(0.2*length(train)) )
+train_control = trainControl(method = "cv")
+caret_dtree_cv = train(days_since_prior_order ~ .,
+                       data = data_for_reg,
+                       subset=tree_sample,
+                       method = "rpart",
+                       tuneGrid = data.frame(cp = seq(0.01, 0.1, length.out = 100)),
+                       trControl = train_control)
+dtree_cv = caret_dtree_cv$finalModel
+
+```
+```{r}
+library(rpart.plot)
+rpart.plot(dtree_cv)
+```
+
+
+
+
+
+
+
+
+
+
+
