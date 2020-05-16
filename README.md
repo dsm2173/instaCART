@@ -8,4 +8,4 @@ We took a two-pronged approach:
 1. Reducing time between orders (and therefore, increasing order frequency)
 2. Increasing reorder rates (to entrench Instacart in customers' grocery shopping habits)
 
-The codes for these two models, as well as the slides we presented to our class, are in this repo. 
+The analysis was performed on R studio server. The codes for these two models, as well as the slides we presented to our class, are in this repo. 
