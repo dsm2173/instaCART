@@ -2,7 +2,7 @@
 
 This is a project by Nicki (Nicola) Kornbluth, Daniel Moskowitz, Sanchya Sahay, and Metika Sikka done for Business Analytics, Spring 2020 at Columbia University.
 
-Our primary goal was to use machine learning models to make customer retention marketing recommendations to Instacart based on “The Instacart Online Grocery Shopping Dataset 2017”, Accessed from https://www.instacart.com/datasets/grocery-shopping-2017 in February 2020. 
+Our primary goal was to use machine learning models to make marketing recommendations to Instacart for customer retention. We used the folloiwng dataset for this project : “The Instacart Online Grocery Shopping Dataset 2017”, Accessed from https://www.instacart.com/datasets/grocery-shopping-2017. 
 
 We took a two-pronged approach:
 1. Reducing time between orders (and therefore, increasing order frequency)
